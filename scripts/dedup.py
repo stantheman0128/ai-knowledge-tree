@@ -9,6 +9,12 @@ from models import Event, ExtractedEvent, RSSItem
 
 logger = logging.getLogger(__name__)
 
+# 跨次去重時，同一事件的不同來源 pub_date 可能相差幾天。
+# 寫入端指紋用 merge group 的最早 pub_date 當日期，查找端則用單一 item
+# 自己的 pub_date，兩者可能差 1-2 天。用與 _is_likely_duplicate 相同的
+# 容忍天數，往前回探幾天的指紋，避免把已知事件當成新事件重複建立。
+FINGERPRINT_DATE_TOLERANCE_DAYS = 2
+
 
 def make_fingerprint(company: str, product: str | None, action: str, date_str: str) -> str:
     """產生事件指紋，用於跨次執行的去重。"""
@@ -172,12 +178,20 @@ def split_new_vs_update(
     updates = []
 
     for item, ev in events:
-        date_str = item.pub_date.date().isoformat()
-        fp = make_fingerprint(ev.company, ev.product, ev.action, date_str)
+        # 寫入端指紋用 merge group 的最早 pub_date，而較晚抵達的同一事件來源
+        # 其 pub_date 會 >= 該最早日期。因此往前回探容忍天數內的每個日期，
+        # 找到任一相符指紋即視為已知事件的新來源。
+        item_date = item.pub_date.date()
+        matched_event_id = None
+        for offset in range(FINGERPRINT_DATE_TOLERANCE_DAYS + 1):
+            date_str = (item_date - timedelta(days=offset)).isoformat()
+            fp = make_fingerprint(ev.company, ev.product, ev.action, date_str)
+            if fp in existing_fingerprints:
+                matched_event_id = existing_fingerprints[fp]
+                break
 
-        if fp in existing_fingerprints:
-            event_id = existing_fingerprints[fp]
-            updates.append(({"name": item.source_name, "link": item.link}, event_id))
+        if matched_event_id is not None:
+            updates.append(({"name": item.source_name, "link": item.link}, matched_event_id))
             logger.debug(f"  Known event, adding source: {ev.headline}")
         else:
             new_events.append((item, ev))
