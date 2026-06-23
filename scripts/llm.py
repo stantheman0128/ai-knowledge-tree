@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 
 # ── 全域設定 ──────────────────────────────────────────────
 
-GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+# 預設值是預覽版 model，可能被下線。用 GEMINI_MODEL 環境變數覆寫成穩定版，
+# 不必改程式。下線時 Gemini 會呼叫失敗並落到 Groq 備援（見 call_llm 的告警）。
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 CALL_DELAY = 1.0  # 每次 API 呼叫間隔（秒）
 
@@ -110,7 +112,10 @@ def call_llm(prompt: str, schema: type[BaseModel]) -> BaseModel:
         logger.debug(f"Gemini OK: {schema.__name__}")
         return result
     except Exception as e:
-        logger.warning(f"Gemini failed ({e}), falling back to Groq...")
+        logger.error(
+            f"Gemini ({GEMINI_MODEL}) failed: {e}. Falling back to Groq ({GROQ_MODEL}) "
+            f"— verify the Gemini model id is still available (set GEMINI_MODEL to override)."
+        )
 
     # 備用 Groq
     try:
