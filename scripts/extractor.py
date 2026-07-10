@@ -121,11 +121,16 @@ FEED_COMPANY_HINTS = {
 # ── 提取邏輯 ──────────────────────────────────────────────
 
 
-def extract_events(feed_cfg: dict, item: RSSItem) -> list[ExtractedEvent]:
+def extract_events(feed_cfg: dict, item: RSSItem) -> list[ExtractedEvent] | None:
     """
     從一則 RSS 項目中提取事件。
 
     Digest 類 feed 可能回傳多個事件，Company blog 回傳一個。
+
+    Returns:
+        成功時回傳事件列表（可能為空，代表內容真的沒有事件）；
+        提取過程拋出例外時回傳 None，讓呼叫端知道這則要下次重試、
+        不可標記為已處理。
     """
     feed_type = feed_cfg["type"]
     # 限制內容長度以節省 token
@@ -138,7 +143,7 @@ def extract_events(feed_cfg: dict, item: RSSItem) -> list[ExtractedEvent]:
             return _extract_from_blog(feed_cfg, item, content)
     except Exception as e:
         logger.error(f"Failed to extract from {item.source_name} [{item.guid}]: {e}")
-        return []
+        return None
 
 
 def _extract_from_digest(item: RSSItem, content: str) -> list[ExtractedEvent]:

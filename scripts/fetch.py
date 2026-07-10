@@ -84,16 +84,23 @@ def main(dry_run: bool = False) -> None:
     logger.info("Step 2: Extracting events via LLM...")
     all_extracted: list[tuple] = []  # [(RSSItem, ExtractedEvent), ...]
     new_guids: list[str] = []
+    failed_count = 0
 
     for feed_cfg, items in feed_results:
         for item in items:
             logger.info(f"Processing: [{item.source_name}] {item.title[:60]}")
             events = extract_events(feed_cfg, item)
+            if events is None:
+                # 提取失敗（extract_events 已記錄原因）：不標記為已處理，下次重試
+                failed_count += 1
+                continue
             for ev in events:
                 all_extracted.append((item, ev))
             new_guids.append(item.guid)
 
     logger.info(f"Extracted {len(all_extracted)} events total")
+    if failed_count:
+        logger.warning(f"{failed_count} item(s) failed extraction — left unmarked, will retry next run")
 
     if not all_extracted:
         logger.info("No events extracted. Updating state and exiting.")
