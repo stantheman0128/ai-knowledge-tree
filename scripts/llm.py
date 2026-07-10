@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 CALL_DELAY = 1.0  # 每次 API 呼叫間隔（秒）
+REQUEST_TIMEOUT = 60.0  # 單一 API 請求的 timeout（秒）
+RETRY_ATTEMPTS = 3  # 每個 provider 最多嘗試次數（含第一次）
+RETRY_BASE_DELAY = 2.0  # 重試等待基數（秒），指數退避 2s → 4s
 
 _gemini_client = None
 _groq_client = None
@@ -36,11 +39,15 @@ def _get_gemini_client():
     global _gemini_client
     if _gemini_client is None:
         from google import genai
+        from google.genai import types
 
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY not set in .env")
-        _gemini_client = genai.Client(api_key=api_key)
+        _gemini_client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=int(REQUEST_TIMEOUT * 1000)),  # 毫秒
+        )
     return _gemini_client
 
 
@@ -51,7 +58,8 @@ def _get_groq_client():
 
         if not _groq_configured():
             raise ValueError("GROQ_API_KEY not configured in .env (missing or placeholder)")
-        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        # max_retries=0：重試統一由 _with_retry 控制，避免 SDK 內建重試疊加
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"), timeout=REQUEST_TIMEOUT, max_retries=0)
     return _groq_client
 
 
@@ -98,6 +106,36 @@ def _call_groq(prompt: str, schema: type[BaseModel]) -> BaseModel:
     return schema.model_validate_json(response.choices[0].message.content)
 
 
+# ── 重試 ──────────────────────────────────────────────────
+
+# 錯誤訊息/類名中出現這些字樣視為暫時性錯誤，值得重試
+_TRANSIENT_MARKERS = (
+    "429", "500", "502", "503", "504",
+    "timeout", "timed out", "connection", "unavailable", "overloaded", "rate limit",
+)
+
+
+def _is_transient(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in text for marker in _TRANSIENT_MARKERS)
+
+
+def _with_retry(fn, label: str):
+    """執行 fn()，遇暫時性錯誤最多重試 RETRY_ATTEMPTS-1 次（指數退避）。"""
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == RETRY_ATTEMPTS or not _is_transient(e):
+                raise
+            delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.warning(
+                f"{label} transient error (attempt {attempt}/{RETRY_ATTEMPTS}): {e}. "
+                f"Retrying in {delay:.0f}s..."
+            )
+            time.sleep(delay)
+
+
 # ── 統一介面 ──────────────────────────────────────────────
 
 
@@ -116,7 +154,7 @@ def call_llm(prompt: str, schema: type[BaseModel]) -> BaseModel:
 
     # 嘗試 Gemini
     try:
-        result = _call_gemini(prompt, schema)
+        result = _with_retry(lambda: _call_gemini(prompt, schema), f"Gemini ({GEMINI_MODEL})")
         logger.debug(f"Gemini OK: {schema.__name__}")
         return result
     except Exception as e:
@@ -138,7 +176,7 @@ def call_llm(prompt: str, schema: type[BaseModel]) -> BaseModel:
         ) from gemini_error
 
     try:
-        result = _call_groq(prompt, schema)
+        result = _with_retry(lambda: _call_groq(prompt, schema), f"Groq ({GROQ_MODEL})")
         logger.debug(f"Groq OK: {schema.__name__}")
         return result
     except Exception as e:
