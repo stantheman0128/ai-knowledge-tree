@@ -22,6 +22,15 @@ CALL_DELAY = 1.0  # 每次 API 呼叫間隔（秒）
 _gemini_client = None
 _groq_client = None
 
+# .env.example 的佔位字串，等同於沒設定
+GROQ_PLACEHOLDER_KEY = "your_groq_api_key_here"
+
+
+def _groq_configured() -> bool:
+    """GROQ_API_KEY 有設定且不是 .env.example 的佔位字串才算可用。"""
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    return bool(api_key) and api_key != GROQ_PLACEHOLDER_KEY
+
 
 def _get_gemini_client():
     global _gemini_client
@@ -40,10 +49,9 @@ def _get_groq_client():
     if _groq_client is None:
         from groq import Groq
 
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY not set in .env")
-        _groq_client = Groq(api_key=api_key)
+        if not _groq_configured():
+            raise ValueError("GROQ_API_KEY not configured in .env (missing or placeholder)")
+        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     return _groq_client
 
 
@@ -112,16 +120,31 @@ def call_llm(prompt: str, schema: type[BaseModel]) -> BaseModel:
         logger.debug(f"Gemini OK: {schema.__name__}")
         return result
     except Exception as e:
+        gemini_error = e
         logger.error(
             f"Gemini ({GEMINI_MODEL}) failed: {e}. Falling back to Groq ({GROQ_MODEL}) "
             f"— verify the Gemini model id is still available (set GEMINI_MODEL to override)."
         )
 
-    # 備用 Groq
+    # 備用 Groq：key 沒設定就別打注定失敗的 API call
+    if not _groq_configured():
+        logger.error("Groq fallback unavailable: GROQ_API_KEY not configured")
+        raise RuntimeError(
+            f"All LLM providers failed for {schema.__name__}: "
+            f"Gemini ({GEMINI_MODEL}) failed with: {gemini_error}; "
+            f"Groq fallback unavailable because GROQ_API_KEY is missing or still the "
+            f"placeholder '{GROQ_PLACEHOLDER_KEY}'. Fix GEMINI_API_KEY/GEMINI_MODEL "
+            f"or set a real GROQ_API_KEY in .env."
+        ) from gemini_error
+
     try:
         result = _call_groq(prompt, schema)
         logger.debug(f"Groq OK: {schema.__name__}")
         return result
     except Exception as e:
         logger.error(f"Groq also failed: {e}")
-        raise RuntimeError(f"All LLM providers failed for {schema.__name__}") from e
+        raise RuntimeError(
+            f"All LLM providers failed for {schema.__name__}: "
+            f"Gemini ({GEMINI_MODEL}): {gemini_error}; Groq ({GROQ_MODEL}): {e}. "
+            f"Check GEMINI_API_KEY/GEMINI_MODEL and GROQ_API_KEY in .env."
+        ) from e
